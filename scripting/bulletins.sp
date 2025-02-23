@@ -3,6 +3,7 @@
 
 #include <sourcemod>
 #include <sdktools>
+#undef REQUIRE_PLUGIN
 #include <updater>
 
 #define UPDATE_URL "https://raw.githubusercontent.com/maxijabase/sm-bulletins/main/updatefile.txt"
