@@ -1,0 +1,18 @@
+"Updater"
+{
+    "Information"
+    {
+        "Version"
+        {
+            "Latest"    "1.0"
+        }
+        
+        "Notes"    "Initial release of Bulletins"
+    }
+    
+    "Files"
+    {
+        "Plugin"    "Path_SM/plugins/sm_bulletins.smx"
+        "Source"    "Path_SM/scripting/sm_bulletins.sp"
+    }
+}
