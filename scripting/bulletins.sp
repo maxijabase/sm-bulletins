@@ -6,7 +6,7 @@
 #undef REQUIRE_PLUGIN
 #include <updater>
 
-#define UPDATE_URL "https://raw.githubusercontent.com/maxijabase/sm-bulletins/main/updatefile.txt"
+#define UPDATE_URL "https://raw.githubusercontent.com/maxijabase/sm-bulletin/main/updatefile.txt"
 #define CHAT_PREFIX "\x04[Bulletins]\x01"
 
 Database g_Database;
