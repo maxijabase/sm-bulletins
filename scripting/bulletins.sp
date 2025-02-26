@@ -14,6 +14,8 @@ bool g_PlayerSubscribed[MAXPLAYERS + 1];
 bool g_BulletinsShown[MAXPLAYERS + 1];
 char g_CurrentBulletinId[MAXPLAYERS + 1][16];
 bool g_ReadingBulletins[MAXPLAYERS + 1];
+bool g_BrowsingHistory[MAXPLAYERS + 1];
+int g_HistoryPage[MAXPLAYERS + 1];
 
 public Plugin myinfo = {
   name = "Bulletins", 
@@ -28,7 +30,8 @@ public void OnPluginStart() {
   RegAdminCmd("sm_bulletin", Command_AddBulletin, ADMFLAG_GENERIC, "Add a new bulletin");
   RegConsoleCmd("sm_subscribe", Command_Subscribe, "Subscribe to optional bulletins");
   RegConsoleCmd("sm_unsubscribe", Command_Unsubscribe, "Unsubscribe from optional bulletins");
-  
+  RegConsoleCmd("sm_bulletins", Command_ViewBulletins, "View all bulletins history");
+
   // Hook inventory event
   HookEvent("post_inventory_application", Event_PostInventoryApplication);
   
@@ -59,6 +62,8 @@ public void OnClientConnected(int client) {
   g_BulletinsShown[client] = false;
   g_CurrentBulletinId[client][0] = '\0';
   g_ReadingBulletins[client] = false;
+  g_BrowsingHistory[client] = false;
+  g_HistoryPage[client] = 0;
 }
 
 public void OnClientDisconnect(int client) {
@@ -148,17 +153,17 @@ public void Query_LoadSubscription(Database db, DBResultSet results, const char[
 }
 
 void ShowPendingBulletins(int client) {
-  if (g_Database == null)return;
+  if (g_Database == null) return;
   
   char steam_id[32];
-  if (!GetClientAuthId(client, AuthId_Steam2, steam_id, sizeof(steam_id)))return;
+  if (!GetClientAuthId(client, AuthId_Steam2, steam_id, sizeof(steam_id))) return;
   
   char query[512];
-  Format(query, sizeof(query), "SELECT a.id, a.message, a.type, DATE_FORMAT(a.created_at, '%%d-%%m-%%Y') as date FROM bulletins_posts a \
+  Format(query, sizeof(query), "SELECT a.id, a.message, a.type, DATE_FORMAT(a.created_at, '%%d/%%m/%%y %%H:%%i') as date FROM bulletins_posts a \
         LEFT JOIN bulletins_reads ar ON a.id = ar.bulletin_id AND ar.steam_id = '%s' \
         WHERE ar.bulletin_id IS NULL AND (a.type = 'global' OR (a.type = 'optional' AND EXISTS \
         (SELECT 1 FROM bulletins_subs WHERE steam_id = '%s' AND subscribed = 1)))", 
-    steam_id, steam_id);
+        steam_id, steam_id);
   
   g_Database.Query(Query_ShowBulletins, query, GetClientUserId(client));
 }
@@ -170,7 +175,7 @@ public void Query_ShowBulletins(Database db, DBResultSet results, const char[] e
   }
   
   int client = GetClientOfUserId(data);
-  if (client == 0)return;
+  if (client == 0) return;
   
   if (!results.RowCount) {
     // Only show the "no more bulletins" message if they were actively reading
@@ -195,7 +200,10 @@ public void Query_ShowBulletins(Database db, DBResultSet results, const char[] e
   Panel panel = new Panel();
   
   char title[128];
-  Format(title, sizeof(title), "New %s Bulletin (%s)", type, date);
+  char formattedType[32];
+  FormatBulletinType(type, formattedType, sizeof(formattedType));
+  
+  Format(title, sizeof(title), "New %s Bulletin (%s)", formattedType, date);
   panel.SetTitle(title);
   
   // Add empty line after title
@@ -218,34 +226,48 @@ public int PanelHandler_Bulletin(Menu menu, MenuAction action, int param1, int p
   switch (action) {
     case MenuAction_Select: {
       // Validate we have a bulletin ID
-      if (g_CurrentBulletinId[param1][0] == '\0')return 0;
+      if (g_CurrentBulletinId[param1][0] == '\0') return 0;
       
-      char steam_id[32];
-      if (!GetClientAuthId(param1, AuthId_Steam2, steam_id, sizeof(steam_id)))
-        return 0;
+      // If not browsing history, mark as read
+      if (!g_BrowsingHistory[param1]) {
+        char steam_id[32];
+        if (!GetClientAuthId(param1, AuthId_Steam2, steam_id, sizeof(steam_id)))
+          return 0;
+        
+        // Escape the steam ID
+        char escaped_steam_id[64];
+        g_Database.Escape(steam_id, escaped_steam_id, sizeof(escaped_steam_id));
+        
+        // Mark as read
+        char query[256];
+        Format(query, sizeof(query), "INSERT INTO bulletins_reads (bulletin_id, steam_id) VALUES ('%s', '%s')", 
+          g_CurrentBulletinId[param1], escaped_steam_id);
+        g_Database.Query(Database_ErrorCheck, query);
+      }
       
-      // Escape the steam ID
-      char escaped_steam_id[64];
-      g_Database.Escape(steam_id, escaped_steam_id, sizeof(escaped_steam_id));
-      
-      // Mark as read
-      char query[256];
-      Format(query, sizeof(query), "INSERT INTO bulletins_reads (bulletin_id, steam_id) VALUES ('%s', '%s')", 
-        g_CurrentBulletinId[param1], escaped_steam_id);
-      g_Database.Query(Database_ErrorCheck, query);
-      
-      // If they pressed 1 (Next), show next bulletin and set reading flag
+      // If they pressed 1 (Next)
       if (param2 == 1) {
-        g_ReadingBulletins[param1] = true;
-        ShowPendingBulletins(param1);
+        if (g_BrowsingHistory[param1]) {
+          // Increment the page counter for history browsing
+          g_HistoryPage[param1]++;
+          ShowBulletinHistory(param1);
+        } else {
+          // Continue with normal unread bulletins
+          g_ReadingBulletins[param1] = true;
+          ShowPendingBulletins(param1);
+        }
+      } else {
+        // Exit
+        g_ReadingBulletins[param1] = false;
+        g_BrowsingHistory[param1] = false;
       }
       
       // Clear the current bulletin ID
       g_CurrentBulletinId[param1][0] = '\0';
     }
     case MenuAction_Cancel: {
-      // Mark as read on cancel too
-      if (g_CurrentBulletinId[param1][0] != '\0') {
+      // If not browsing history, mark as read on cancel too
+      if (!g_BrowsingHistory[param1] && g_CurrentBulletinId[param1][0] != '\0') {
         char steam_id[32];
         if (GetClientAuthId(param1, AuthId_Steam2, steam_id, sizeof(steam_id))) {
           char escaped_steam_id[64];
@@ -258,9 +280,10 @@ public int PanelHandler_Bulletin(Menu menu, MenuAction action, int param1, int p
         }
       }
       
-      // Clear the current bulletin ID and reading flag
+      // Clear the current bulletin ID and flags
       g_CurrentBulletinId[param1][0] = '\0';
       g_ReadingBulletins[param1] = false;
+      g_BrowsingHistory[param1] = false;
     }
     case MenuAction_End: {
       delete view_as<Panel>(menu);
@@ -356,8 +379,157 @@ public Action Command_Unsubscribe(int client, int args) {
   return Plugin_Handled;
 }
 
+public Action Command_ViewBulletins(int client, int args) {
+  if (client == 0) return Plugin_Handled;
+  
+  // Start browsing history from the first page
+  g_BrowsingHistory[client] = true;
+  g_HistoryPage[client] = 0;
+  g_ReadingBulletins[client] = true;
+  ShowBulletinHistory(client);
+  
+  return Plugin_Handled;
+}
+
+void ShowBulletinHistory(int client) {
+  if (g_Database == null) return;
+  
+  char steam_id[32];
+  if (!GetClientAuthId(client, AuthId_Steam2, steam_id, sizeof(steam_id))) return;
+  
+  // First, get the total count of bulletins for this player
+  char countQuery[512];
+  Format(countQuery, sizeof(countQuery), "SELECT COUNT(*) FROM bulletins_posts b \
+        WHERE (b.type = 'global' OR (b.type = 'optional' AND EXISTS \
+        (SELECT 1 FROM bulletins_subs WHERE steam_id = '%s' AND subscribed = 1)))", 
+    steam_id);
+  
+  g_Database.Query(Query_GetBulletinCount, countQuery, GetClientUserId(client));
+}
+
+public void Query_GetBulletinCount(Database db, DBResultSet results, const char[] error, any data) {
+  if (error[0]) {
+    LogError("Failed to get bulletin count: %s", error);
+    return;
+  }
+  
+  int client = GetClientOfUserId(data);
+  if (client == 0) return;
+  
+  if (!results.FetchRow()) {
+    PrintToChat(client, "%s Error retrieving bulletins.", CHAT_PREFIX);
+    g_ReadingBulletins[client] = false;
+    g_BrowsingHistory[client] = false;
+    return;
+  }
+  
+  int totalBulletins = results.FetchInt(0);
+  
+  if (totalBulletins == 0) {
+    PrintToChat(client, "%s No bulletins found!", CHAT_PREFIX);
+    g_ReadingBulletins[client] = false;
+    g_BrowsingHistory[client] = false;
+    return;
+  }
+  
+  // If we've gone past the end, loop back to the beginning
+  if (g_HistoryPage[client] >= totalBulletins) {
+    g_HistoryPage[client] = 0;
+  }
+  
+  // Now get the specific bulletin at the current page index
+  char steam_id[32];
+  if (!GetClientAuthId(client, AuthId_Steam2, steam_id, sizeof(steam_id))) return;
+  
+  char query[512];
+  Format(query, sizeof(query), "SELECT b.id, b.message, b.type, DATE_FORMAT(b.created_at, '%%d/%%m/%%y %%H:%%i') as date, \
+        CASE WHEN br.bulletin_id IS NULL THEN 0 ELSE 1 END as is_read \
+        FROM bulletins_posts b \
+        LEFT JOIN bulletins_reads br ON b.id = br.bulletin_id AND br.steam_id = '%s' \
+        WHERE (b.type = 'global' OR (b.type = 'optional' AND EXISTS \
+        (SELECT 1 FROM bulletins_subs WHERE steam_id = '%s' AND subscribed = 1))) \
+        ORDER BY b.created_at DESC LIMIT %d, 1", 
+        steam_id, steam_id, g_HistoryPage[client]);
+  
+  // Pass the total bulletin count as part of the data
+  DataPack pack = new DataPack();
+  pack.WriteCell(GetClientUserId(client));
+  pack.WriteCell(totalBulletins);
+  g_Database.Query(Query_ShowBulletinHistoryWithCount, query, pack);
+}
+
+public void Query_ShowBulletinHistoryWithCount(Database db, DBResultSet results, const char[] error, any data) {
+  DataPack pack = view_as<DataPack>(data);
+  pack.Reset();
+  int userid = pack.ReadCell();
+  int totalBulletins = pack.ReadCell();
+  delete pack;
+  
+  if (error[0]) {
+    LogError("Failed to load bulletin history: %s", error);
+    return;
+  }
+  
+  int client = GetClientOfUserId(userid);
+  if (client == 0) return;
+  
+  if (!results.RowCount) {
+    PrintToChat(client, "%s Error retrieving bulletin at index %d.", CHAT_PREFIX, g_HistoryPage[client]);
+    g_ReadingBulletins[client] = false;
+    g_BrowsingHistory[client] = false;
+    return;
+  }
+  
+  // Get the bulletin
+  results.FetchRow();
+  char id[16], message[1024], type[16], date[32];
+  results.FetchString(0, id, sizeof(id));
+  results.FetchString(1, message, sizeof(message));
+  results.FetchString(2, type, sizeof(type));
+  results.FetchString(3, date, sizeof(date));
+  bool isRead = results.FetchInt(4) == 1;
+  
+  // Store the current bulletin ID
+  strcopy(g_CurrentBulletinId[client], sizeof(g_CurrentBulletinId[]), id);
+  
+  Panel panel = new Panel();
+  
+  char title[128];
+  char formattedType[32];
+  FormatBulletinType(type, formattedType, sizeof(formattedType));
+  
+  Format(title, sizeof(title), "%s Bulletin (%s) [%d/%d]%s", 
+    formattedType, date, g_HistoryPage[client] + 1, totalBulletins, isRead ? " [Read]" : "");
+  panel.SetTitle(title);
+  
+  // Add empty line after title
+  panel.DrawText(" ");
+  
+  // Add message with word wrap
+  panel.DrawText(message);
+  
+  // Add empty line after message
+  panel.DrawText(" ");
+  
+  // Draw the navigation items
+  panel.DrawItem("Next", ITEMDRAW_CONTROL);
+  panel.DrawItem("Exit", ITEMDRAW_CONTROL);
+  
+  panel.Send(client, PanelHandler_Bulletin, MENU_TIME_FOREVER);
+}
+
 void Database_ErrorCheck(Database db, DBResultSet results, const char[] error, any data) {
   if (error[0]) {
     LogError("Database error: %s", error);
   }
 } 
+
+void FormatBulletinType(const char[] type, char[] buffer, int maxlen) {
+  if (strcmp(type, "global", false) == 0) {
+    strcopy(buffer, maxlen, "Global");
+  } else if (strcmp(type, "optional", false) == 0) {
+    strcopy(buffer, maxlen, "Optional");
+  } else {
+    strcopy(buffer, maxlen, type);
+  }
+}
