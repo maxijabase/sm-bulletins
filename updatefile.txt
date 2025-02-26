@@ -12,7 +12,7 @@
     
     "Files"
     {
-        "Plugin"    "Path_SM/plugins/sm_bulletins.smx"
-        "Source"    "Path_SM/scripting/sm_bulletins.sp"
+        "Plugin"    "Path_SM/plugins/bulletins.smx"
+        "Source"    "Path_SM/scripting/bulletins.sp"
     }
 }
