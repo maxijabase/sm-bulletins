@@ -16,12 +16,13 @@ char g_CurrentBulletinId[MAXPLAYERS + 1][16];
 bool g_ReadingBulletins[MAXPLAYERS + 1];
 bool g_BrowsingHistory[MAXPLAYERS + 1];
 int g_HistoryPage[MAXPLAYERS + 1];
+bool g_IsSQLite = false; // Flag to track database type
 
 public Plugin myinfo = {
   name = "Bulletins", 
   author = "ampere", 
   description = "Database-driven bulletin system with global and optional messages", 
-  version = "1.0", 
+  version = "1.1", 
   url = "github.com/maxijabase"
 };
 
@@ -95,15 +96,31 @@ void Database_OnConnect(Database db, const char[] error, any data) {
   
   g_Database = db;
   
-  // Create tables if they don't exist
+  // Determine database type
+  char driver[16];
+  g_Database.Driver.GetIdentifier(driver, sizeof(driver));
+  g_IsSQLite = StrEqual(driver, "sqlite", false);
+  
+  // Create tables if they don't exist - with database-specific syntax
   char query[1024];
-  Format(query, sizeof(query), "CREATE TABLE IF NOT EXISTS bulletins_posts (\
-        id INTEGER PRIMARY KEY AUTO_INCREMENT, \
-        message VARCHAR(255) NOT NULL, \
-        type ENUM('global', 'optional') NOT NULL, \
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)");
+  if (g_IsSQLite) {
+    // SQLite syntax
+    Format(query, sizeof(query), "CREATE TABLE IF NOT EXISTS bulletins_posts (\
+          id INTEGER PRIMARY KEY AUTOINCREMENT, \
+          message TEXT NOT NULL, \
+          type TEXT CHECK(type IN ('global', 'optional')) NOT NULL, \
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)");
+  } else {
+    // MySQL syntax
+    Format(query, sizeof(query), "CREATE TABLE IF NOT EXISTS bulletins_posts (\
+          id INTEGER PRIMARY KEY AUTO_INCREMENT, \
+          message VARCHAR(255) NOT NULL, \
+          type ENUM('global', 'optional') NOT NULL, \
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)");
+  }
   g_Database.Query(Database_ErrorCheck, query);
   
+  // bulletins_reads table - similar in both engines
   Format(query, sizeof(query), "CREATE TABLE IF NOT EXISTS bulletins_reads (\
         bulletin_id INTEGER, \
         steam_id VARCHAR(32), \
@@ -111,17 +128,18 @@ void Database_OnConnect(Database db, const char[] error, any data) {
         PRIMARY KEY (bulletin_id, steam_id))");
   g_Database.Query(Database_ErrorCheck, query);
   
+  // bulletins_subs table - similar in both engines
   Format(query, sizeof(query), "CREATE TABLE IF NOT EXISTS bulletins_subs (\
         steam_id VARCHAR(32) PRIMARY KEY, \
-        subscribed BOOLEAN DEFAULT 1)");
+        subscribed INTEGER DEFAULT 1)"); // Using INTEGER instead of BOOLEAN for SQLite
   g_Database.Query(Database_ErrorCheck, query);
 }
 
 void LoadClientSubscription(int client) {
-  if (g_Database == null)return;
+  if (g_Database == null) return;
   
   char steam_id[32];
-  if (!GetClientAuthId(client, AuthId_Steam2, steam_id, sizeof(steam_id)))return;
+  if (!GetClientAuthId(client, AuthId_Steam2, steam_id, sizeof(steam_id))) return;
   
   char query[256];
   Format(query, sizeof(query), "SELECT subscribed FROM bulletins_subs WHERE steam_id = '%s'", steam_id);
@@ -135,14 +153,14 @@ public void Query_LoadSubscription(Database db, DBResultSet results, const char[
   }
   
   int client = GetClientOfUserId(data);
-  if (client == 0)return;
+  if (client == 0) return;
   
   if (results.FetchRow()) {
     g_PlayerSubscribed[client] = results.FetchInt(0) == 1;
   } else {
     // Insert default subscription status
     char steam_id[32];
-    if (!GetClientAuthId(client, AuthId_Steam2, steam_id, sizeof(steam_id)))return;
+    if (!GetClientAuthId(client, AuthId_Steam2, steam_id, sizeof(steam_id))) return;
     
     char query[256];
     Format(query, sizeof(query), "INSERT INTO bulletins_subs (steam_id, subscribed) VALUES ('%s', 1)", steam_id);
@@ -159,11 +177,21 @@ void ShowPendingBulletins(int client) {
   if (!GetClientAuthId(client, AuthId_Steam2, steam_id, sizeof(steam_id))) return;
   
   char query[512];
-  Format(query, sizeof(query), "SELECT a.id, a.message, a.type, DATE_FORMAT(a.created_at, '%%d/%%m/%%y %%H:%%i') as date FROM bulletins_posts a \
-        LEFT JOIN bulletins_reads ar ON a.id = ar.bulletin_id AND ar.steam_id = '%s' \
-        WHERE ar.bulletin_id IS NULL AND (a.type = 'global' OR (a.type = 'optional' AND EXISTS \
-        (SELECT 1 FROM bulletins_subs WHERE steam_id = '%s' AND subscribed = 1)))", 
-        steam_id, steam_id);
+  if (g_IsSQLite) {
+    // SQLite date formatting
+    Format(query, sizeof(query), "SELECT a.id, a.message, a.type, strftime('%%d/%%m/%%y %%H:%%M', a.created_at) as date FROM bulletins_posts a \
+          LEFT JOIN bulletins_reads ar ON a.id = ar.bulletin_id AND ar.steam_id = '%s' \
+          WHERE ar.bulletin_id IS NULL AND (a.type = 'global' OR (a.type = 'optional' AND EXISTS \
+          (SELECT 1 FROM bulletins_subs WHERE steam_id = '%s' AND subscribed = 1)))", 
+          steam_id, steam_id);
+  } else {
+    // MySQL date formatting
+    Format(query, sizeof(query), "SELECT a.id, a.message, a.type, DATE_FORMAT(a.created_at, '%%d/%%m/%%y %%H:%%i') as date FROM bulletins_posts a \
+          LEFT JOIN bulletins_reads ar ON a.id = ar.bulletin_id AND ar.steam_id = '%s' \
+          WHERE ar.bulletin_id IS NULL AND (a.type = 'global' OR (a.type = 'optional' AND EXISTS \
+          (SELECT 1 FROM bulletins_subs WHERE steam_id = '%s' AND subscribed = 1)))", 
+          steam_id, steam_id);
+  }
   
   g_Database.Query(Query_ShowBulletins, query, GetClientUserId(client));
 }
@@ -321,9 +349,13 @@ public Action Command_AddBulletin(int client, int args) {
   char trimmedMessage[1024];
   strcopy(trimmedMessage, sizeof(trimmedMessage), message[typeLen]);
   
+  // Escape the message to prevent SQL injection
+  char escapedMessage[2048];
+  g_Database.Escape(trimmedMessage, escapedMessage, sizeof(escapedMessage));
+  
   char query[2048];
   Format(query, sizeof(query), "INSERT INTO bulletins_posts (message, type) VALUES ('%s', '%s')", 
-    trimmedMessage, type);
+    escapedMessage, type);
   g_Database.Query(Database_ErrorCheck, query);
   
   ReplyToCommand(client, "%s Bulletin added successfully.", CHAT_PREFIX);
@@ -339,17 +371,24 @@ public Action Command_AddBulletin(int client, int args) {
 }
 
 public Action Command_Subscribe(int client, int args) {
-  if (client == 0)return Plugin_Handled;
+  if (client == 0) return Plugin_Handled;
   
   char steam_id[32];
-  if (!GetClientAuthId(client, AuthId_Steam2, steam_id, sizeof(steam_id)))return Plugin_Handled;
+  if (!GetClientAuthId(client, AuthId_Steam2, steam_id, sizeof(steam_id))) return Plugin_Handled;
   
   char escaped_steam_id[64];
   g_Database.Escape(steam_id, escaped_steam_id, sizeof(escaped_steam_id));
   
-  char query[256];
-  Format(query, sizeof(query), "INSERT INTO bulletins_subs (steam_id, subscribed) VALUES ('%s', 1) \
-        ON DUPLICATE KEY UPDATE subscribed = 1", escaped_steam_id);
+  char query[512];
+  if (g_IsSQLite) {
+    // SQLite version - use INSERT OR REPLACE
+    Format(query, sizeof(query), "INSERT OR REPLACE INTO bulletins_subs (steam_id, subscribed) VALUES ('%s', 1)", 
+      escaped_steam_id);
+  } else {
+    // MySQL version - use ON DUPLICATE KEY UPDATE
+    Format(query, sizeof(query), "INSERT INTO bulletins_subs (steam_id, subscribed) VALUES ('%s', 1) \
+          ON DUPLICATE KEY UPDATE subscribed = 1", escaped_steam_id);
+  }
   g_Database.Query(Database_ErrorCheck, query);
   
   g_PlayerSubscribed[client] = true;
@@ -360,17 +399,24 @@ public Action Command_Subscribe(int client, int args) {
 }
 
 public Action Command_Unsubscribe(int client, int args) {
-  if (client == 0)return Plugin_Handled;
+  if (client == 0) return Plugin_Handled;
   
   char steam_id[32];
-  if (!GetClientAuthId(client, AuthId_Steam2, steam_id, sizeof(steam_id)))return Plugin_Handled;
+  if (!GetClientAuthId(client, AuthId_Steam2, steam_id, sizeof(steam_id))) return Plugin_Handled;
   
   char escaped_steam_id[64];
   g_Database.Escape(steam_id, escaped_steam_id, sizeof(escaped_steam_id));
   
-  char query[256];
-  Format(query, sizeof(query), "INSERT INTO bulletins_subs (steam_id, subscribed) VALUES ('%s', 0) \
-        ON DUPLICATE KEY UPDATE subscribed = 0", escaped_steam_id);
+  char query[512];
+  if (g_IsSQLite) {
+    // SQLite version - use INSERT OR REPLACE
+    Format(query, sizeof(query), "INSERT OR REPLACE INTO bulletins_subs (steam_id, subscribed) VALUES ('%s', 0)", 
+      escaped_steam_id);
+  } else {
+    // MySQL version - use ON DUPLICATE KEY UPDATE
+    Format(query, sizeof(query), "INSERT INTO bulletins_subs (steam_id, subscribed) VALUES ('%s', 0) \
+          ON DUPLICATE KEY UPDATE subscribed = 0", escaped_steam_id);
+  }
   g_Database.Query(Database_ErrorCheck, query);
   
   g_PlayerSubscribed[client] = false;
@@ -441,15 +487,28 @@ public void Query_GetBulletinCount(Database db, DBResultSet results, const char[
   char steam_id[32];
   if (!GetClientAuthId(client, AuthId_Steam2, steam_id, sizeof(steam_id))) return;
   
-  char query[512];
-  Format(query, sizeof(query), "SELECT b.id, b.message, b.type, DATE_FORMAT(b.created_at, '%%d/%%m/%%y %%H:%%i') as date, \
-        CASE WHEN br.bulletin_id IS NULL THEN 0 ELSE 1 END as is_read \
-        FROM bulletins_posts b \
-        LEFT JOIN bulletins_reads br ON b.id = br.bulletin_id AND br.steam_id = '%s' \
-        WHERE (b.type = 'global' OR (b.type = 'optional' AND EXISTS \
-        (SELECT 1 FROM bulletins_subs WHERE steam_id = '%s' AND subscribed = 1))) \
-        ORDER BY b.created_at DESC LIMIT %d, 1", 
-        steam_id, steam_id, g_HistoryPage[client]);
+  char query[768];
+  if (g_IsSQLite) {
+    // SQLite date formatting
+    Format(query, sizeof(query), "SELECT b.id, b.message, b.type, strftime('%%d/%%m/%%y %%H:%%M', b.created_at) as date, \
+          CASE WHEN br.bulletin_id IS NULL THEN 0 ELSE 1 END as is_read \
+          FROM bulletins_posts b \
+          LEFT JOIN bulletins_reads br ON b.id = br.bulletin_id AND br.steam_id = '%s' \
+          WHERE (b.type = 'global' OR (b.type = 'optional' AND EXISTS \
+          (SELECT 1 FROM bulletins_subs WHERE steam_id = '%s' AND subscribed = 1))) \
+          ORDER BY b.created_at DESC LIMIT 1 OFFSET %d", 
+          steam_id, steam_id, g_HistoryPage[client]);
+  } else {
+    // MySQL date formatting and limit syntax
+    Format(query, sizeof(query), "SELECT b.id, b.message, b.type, DATE_FORMAT(b.created_at, '%%d/%%m/%%y %%H:%%i') as date, \
+          CASE WHEN br.bulletin_id IS NULL THEN 0 ELSE 1 END as is_read \
+          FROM bulletins_posts b \
+          LEFT JOIN bulletins_reads br ON b.id = br.bulletin_id AND br.steam_id = '%s' \
+          WHERE (b.type = 'global' OR (b.type = 'optional' AND EXISTS \
+          (SELECT 1 FROM bulletins_subs WHERE steam_id = '%s' AND subscribed = 1))) \
+          ORDER BY b.created_at DESC LIMIT %d, 1", 
+          steam_id, steam_id, g_HistoryPage[client]);
+  }
   
   // Pass the total bulletin count as part of the data
   DataPack pack = new DataPack();
