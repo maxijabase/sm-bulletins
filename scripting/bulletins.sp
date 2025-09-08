@@ -18,11 +18,16 @@ bool g_BrowsingHistory[MAXPLAYERS + 1];
 int g_HistoryPage[MAXPLAYERS + 1];
 bool g_IsSQLite = false; // Flag to track database type
 
+// Preview bulletin data
+bool g_PreviewingBulletin[MAXPLAYERS + 1];
+char g_PreviewMessage[MAXPLAYERS + 1][1024];
+char g_PreviewType[MAXPLAYERS + 1][16];
+
 public Plugin myinfo = {
   name = "Bulletins", 
   author = "ampere", 
   description = "Database-driven bulletin system with global and optional messages", 
-  version = "1.1", 
+  version = "1.2", 
   url = "github.com/maxijabase"
 };
 
@@ -65,6 +70,9 @@ public void OnClientConnected(int client) {
   g_ReadingBulletins[client] = false;
   g_BrowsingHistory[client] = false;
   g_HistoryPage[client] = 0;
+  g_PreviewingBulletin[client] = false;
+  g_PreviewMessage[client][0] = '\0';
+  g_PreviewType[client][0] = '\0';
 }
 
 public void OnClientDisconnect(int client) {
@@ -237,8 +245,8 @@ public void Query_ShowBulletins(Database db, DBResultSet results, const char[] e
   // Add empty line after title
   panel.DrawText(" ");
   
-  // Add message with word wrap
-  panel.DrawText(message);
+  // Add message with word wrap and newline support
+  DrawMultiLineText(panel, message);
   
   // Add empty line after message
   panel.DrawText(" ");
@@ -248,6 +256,85 @@ public void Query_ShowBulletins(Database db, DBResultSet results, const char[] e
   panel.DrawItem("Exit", ITEMDRAW_CONTROL);
   
   panel.Send(client, PanelHandler_Bulletin, MENU_TIME_FOREVER);
+}
+
+void ShowBulletinPreview(int client) {
+  Panel panel = new Panel();
+  
+  char title[128];
+  char formattedType[32];
+  FormatBulletinType(g_PreviewType[client], formattedType, sizeof(formattedType));
+  
+  Format(title, sizeof(title), "Preview %s Bulletin", formattedType);
+  panel.SetTitle(title);
+  
+  // Add empty line after title
+  panel.DrawText(" ");
+  
+  // Add message with word wrap and newline support
+  DrawMultiLineText(panel, g_PreviewMessage[client]);
+  
+  // Add empty line after message
+  panel.DrawText(" ");
+  
+  // Draw the confirmation items
+  panel.DrawItem("Send Bulletin", ITEMDRAW_CONTROL);
+  panel.DrawItem("Cancel", ITEMDRAW_CONTROL);
+  
+  panel.Send(client, PanelHandler_BulletinPreview, MENU_TIME_FOREVER);
+}
+
+public int PanelHandler_BulletinPreview(Menu menu, MenuAction action, int param1, int param2) {
+  switch (action) {
+    case MenuAction_Select: {
+      if (!g_PreviewingBulletin[param1]) return 0;
+      
+      // If they pressed 1 (Send Bulletin)
+      if (param2 == 1) {
+        SendBulletin(param1, g_PreviewType[param1], g_PreviewMessage[param1]);
+      }
+      
+      // Clear preview data
+      g_PreviewingBulletin[param1] = false;
+      g_PreviewMessage[param1][0] = '\0';
+      g_PreviewType[param1][0] = '\0';
+    }
+    case MenuAction_Cancel: {
+      // Clear preview data on cancel
+      g_PreviewingBulletin[param1] = false;
+      g_PreviewMessage[param1][0] = '\0';
+      g_PreviewType[param1][0] = '\0';
+    }
+    case MenuAction_End: {
+      delete view_as<Panel>(menu);
+    }
+  }
+  return 0;
+}
+
+void SendBulletin(int client, const char[] type, const char[] message) {
+  if (g_Database == null) {
+    ReplyToCommand(client, "%s Database not available.", CHAT_PREFIX);
+    return;
+  }
+  
+  // Escape the message to prevent SQL injection
+  char escapedMessage[2048];
+  g_Database.Escape(message, escapedMessage, sizeof(escapedMessage));
+  
+  char query[2048];
+  Format(query, sizeof(query), "INSERT INTO bulletins_posts (message, type) VALUES ('%s', '%s')", 
+    escapedMessage, type);
+  g_Database.Query(Database_ErrorCheck, query);
+  
+  ReplyToCommand(client, "%s Bulletin sent successfully.", CHAT_PREFIX);
+  
+  // Show the new bulletin to all applicable players
+  for (int i = 1; i <= MaxClients; i++) {
+    if (IsClientInGame(i) && !IsFakeClient(i)) {
+      ShowPendingBulletins(i);
+    }
+  }
 }
 
 public int PanelHandler_Bulletin(Menu menu, MenuAction action, int param1, int param2) {
@@ -349,23 +436,12 @@ public Action Command_AddBulletin(int client, int args) {
   char trimmedMessage[1024];
   strcopy(trimmedMessage, sizeof(trimmedMessage), message[typeLen]);
   
-  // Escape the message to prevent SQL injection
-  char escapedMessage[2048];
-  g_Database.Escape(trimmedMessage, escapedMessage, sizeof(escapedMessage));
+  // Store preview data and show preview
+  strcopy(g_PreviewType[client], sizeof(g_PreviewType[]), type);
+  strcopy(g_PreviewMessage[client], sizeof(g_PreviewMessage[]), trimmedMessage);
+  g_PreviewingBulletin[client] = true;
   
-  char query[2048];
-  Format(query, sizeof(query), "INSERT INTO bulletins_posts (message, type) VALUES ('%s', '%s')", 
-    escapedMessage, type);
-  g_Database.Query(Database_ErrorCheck, query);
-  
-  ReplyToCommand(client, "%s Bulletin added successfully.", CHAT_PREFIX);
-  
-  // Show the new bulletin to all applicable players
-  for (int i = 1; i <= MaxClients; i++) {
-    if (IsClientInGame(i) && !IsFakeClient(i)) {
-      ShowPendingBulletins(i);
-    }
-  }
+  ShowBulletinPreview(client);
   
   return Plugin_Handled;
 }
@@ -564,8 +640,8 @@ public void Query_ShowBulletinHistoryWithCount(Database db, DBResultSet results,
   // Add empty line after title
   panel.DrawText(" ");
   
-  // Add message with word wrap
-  panel.DrawText(message);
+  // Add message with word wrap and newline support
+  DrawMultiLineText(panel, message);
   
   // Add empty line after message
   panel.DrawText(" ");
@@ -582,6 +658,15 @@ void Database_ErrorCheck(Database db, DBResultSet results, const char[] error, a
     LogError("Database error: %s", error);
   }
 } 
+
+void DrawMultiLineText(Panel panel, const char[] message) {
+  char lines[32][256];
+  int lineCount = ExplodeString(message, "\\n", lines, sizeof(lines), sizeof(lines[]));
+  
+  for (int i = 0; i < lineCount; i++) {
+    panel.DrawText(lines[i]);
+  }
+}
 
 void FormatBulletinType(const char[] type, char[] buffer, int maxlen) {
   if (strcmp(type, "global", false) == 0) {
