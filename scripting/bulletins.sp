@@ -27,7 +27,7 @@ public Plugin myinfo = {
   name = "Bulletins", 
   author = "ampere", 
   description = "Database-driven bulletin system with global and optional messages", 
-  version = "1.2", 
+  version = "1.3", 
   url = "github.com/maxijabase"
 };
 
@@ -42,7 +42,13 @@ public void OnPluginStart() {
   HookEvent("post_inventory_application", Event_PostInventoryApplication);
   
   // Database connection
-  Database.Connect(Database_OnConnect, "bulletins");
+  if (SQL_CheckConfig("bulletins")) {
+    LogMessage("Found 'bulletins' database config, connecting...");
+    Database.Connect(Database_OnConnect, "bulletins");
+  } else {
+    LogMessage("No 'bulletins' database config found, using storage-local (SQLite)");
+    Database.Connect(Database_OnConnect, "storage-local");
+  }
   
   // Load all clients' subscription status
   for (int i = 1; i <= MaxClients; i++) {
@@ -108,6 +114,9 @@ void Database_OnConnect(Database db, const char[] error, any data) {
   char driver[16];
   g_Database.Driver.GetIdentifier(driver, sizeof(driver));
   g_IsSQLite = StrEqual(driver, "sqlite", false);
+  
+  // Log successful connection
+  LogMessage("Successfully connected to database (%s)", driver);
   
   // Create tables if they don't exist - with database-specific syntax
   char query[1024];

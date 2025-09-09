@@ -4,7 +4,7 @@
     {
         "Version"
         {
-            "Latest"    "1.2"
+            "Latest"    "1.3"
         }
         
         "Notes"    "Added bulletin preview system - admins now see exactly how bulletins will appear before sending"
@@ -13,6 +13,7 @@
         "Notes"    "Preview shows identical formatting to actual player display"
         "Notes"    "Enhanced admin workflow with preview-before-send functionality"
         "Notes"    "Backwards compatible with existing bulletin commands"
+        "Notes"    "Automatic database fallback to SQLite when bulletins config is not found"
     }
     
     "Files"
