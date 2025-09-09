@@ -4,10 +4,15 @@
     {
         "Version"
         {
-            "Latest"    "1.0"
+            "Latest"    "1.2"
         }
         
-        "Notes"    "Initial release of Bulletins"
+        "Notes"    "Added bulletin preview system - admins now see exactly how bulletins will appear before sending"
+        "Notes"    "Interactive confirmation menu with 'Send Bulletin' and 'Cancel' options"
+        "Notes"    "Full newline support using \\n sequences for multi-line bulletins"
+        "Notes"    "Preview shows identical formatting to actual player display"
+        "Notes"    "Enhanced admin workflow with preview-before-send functionality"
+        "Notes"    "Backwards compatible with existing bulletin commands"
     }
     
     "Files"
